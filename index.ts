@@ -2,23 +2,23 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const REFRESH_MS = 90_000;
+const CACHE_MAX_AGE_MS = 90_000;
 const REQUEST_TIMEOUT_MS = 3_000;
 const POOL_TOKEN_SERVICE = "cpa_pool_read_token";
 const DEFAULT_POOL_URL = "https://api.zhangjiajia.me/v0/codex-pool";
 const PLUGIN_VERSION = "0.2.0";
-const STALE_AFTER_MS = 2 * REFRESH_MS;
+const STALE_AFTER_MS = 2 * CACHE_MAX_AGE_MS;
 const NO_DATA = "Codex pool quota unavailable; OMP continues normally.";
 
 type PoolValue = { remainingPct: number | null; accountEquivalent: number; knownAccounts: number; eligibleAccounts: number; complete: boolean };
 type FiveHourPool = { limitedAccounts: number; unrestrictedAccounts: number; unknownAccounts: number; constrainedPoolRemainingPct: number | null; limitedEquivalent: number; complete: boolean };
 type PoolSnapshot = { schemaVersion: 1; accountsTotal: number; accountsAvailable: number; weekly: PoolValue; fiveHour: FiveHourPool; updatedAt: number; complete: boolean; stale: boolean; staleSeconds: number; lastError: string | null };
-type Runtime = { lastCompleteSnapshot: PoolSnapshot | null; lastSnapshot: PoolSnapshot | null; request: Promise<PoolSnapshot | null> | null; timerStarted: boolean; timer: unknown; endpoint: string; credentialSource: string; lastErrorCategory: string | null; lastSuccessAt: number | null; refreshCycles: number; httpRequests: number; renderRequests: number; inputRequests: number };
-type CommandContext = { hasUI: boolean; setInterval(callback: () => void, ms: number): unknown; clearTimer(timer: unknown): void; ui: { notify(message: string, level: string): void; setStatus(key: string, text: string | undefined): void; custom(factory: (tui: unknown, theme: unknown, keys: unknown, done: () => void) => { render(width: number): readonly string[]; handleInput?(data: string): void; dispose?(): void }): Promise<void> } };
+type Runtime = { lastCompleteSnapshot: PoolSnapshot | null; lastSnapshot: PoolSnapshot | null; request: Promise<PoolSnapshot | null> | null; endpoint: string; credentialSource: string; lastErrorCategory: string | null; lastSuccessAt: number | null; refreshCycles: number; httpRequests: number; renderRequests: number; inputRequests: number };
+type CommandContext = { hasUI: boolean; ui: { notify(message: string, level: string): void; setStatus(key: string, text: string | undefined): void; custom(factory: (tui: unknown, theme: unknown, keys: unknown, done: () => void) => { render(width: number): readonly string[]; handleInput?(data: string): void; dispose?(): void }): Promise<void> } };
 type ExtensionApi = { registerCommand(name: string, options: { description: string; handler(args: string, ctx: CommandContext): Promise<void> }): void; on(event: string, handler: (event: unknown, ctx?: CommandContext) => void): void; logger?: { info(message: string): void } };
 
 const host = globalThis as typeof globalThis & { __ompCpaPoolV3?: Runtime };
-const runtime = host.__ompCpaPoolV3 ??= { lastCompleteSnapshot: null, lastSnapshot: null, request: null, timerStarted: false, timer: null, endpoint: "", credentialSource: "unknown", lastErrorCategory: null, lastSuccessAt: null, refreshCycles: 0, httpRequests: 0, renderRequests: 0, inputRequests: 0 };
+const runtime = host.__ompCpaPoolV3 ??= { lastCompleteSnapshot: null, lastSnapshot: null, request: null, endpoint: "", credentialSource: "unknown", lastErrorCategory: null, lastSuccessAt: null, refreshCycles: 0, httpRequests: 0, renderRequests: 0, inputRequests: 0 };
 const subscribers = new Set<(snapshot: PoolSnapshot | null) => void>();
 
 /** Canonical boundary guard for untrusted JSON in this package. */
@@ -85,7 +85,7 @@ function parseSnapshot(payload: unknown): PoolSnapshot | null {
   return { schemaVersion: 1, accountsTotal: total, accountsAvailable: available, weekly, fiveHour, updatedAt, complete: payload.complete === true && weekly.complete, stale: payload.stale === true, staleSeconds: numeric(payload.stale_seconds) ?? 0, lastError: typeof payload.last_error === "string" && payload.last_error ? payload.last_error : null };
 }
 async function performRefresh(force: boolean): Promise<PoolSnapshot | null> {
-  if (!force && runtime.lastSnapshot && Date.now() - runtime.lastSnapshot.updatedAt < REFRESH_MS) return runtime.lastSnapshot;
+  if (!force && runtime.lastSnapshot && Date.now() - runtime.lastSnapshot.updatedAt < CACHE_MAX_AGE_MS) return runtime.lastSnapshot;
   if (runtime.request) return runtime.request;
   runtime.request = (async () => {
     runtime.refreshCycles += 1;
@@ -143,7 +143,7 @@ function detailLines(snapshot: PoolSnapshot | null): string[] {
   return header;
 }
 function debugLines(): string[] {
-  return ["Codex Pool diagnostics", "", `Version         ${PLUGIN_VERSION}`, `Endpoint        ${runtime.endpoint || "unresolved"}`, `Credential      ${runtime.credentialSource}`, `Refresh cycles  ${runtime.refreshCycles}`, `HTTP requests   ${runtime.httpRequests}`, `Status renders  ${runtime.renderRequests}`, `Input requests  ${runtime.inputRequests}`, `Last error      ${runtime.lastErrorCategory ?? "none"}`, `Snapshot        ${runtime.lastSnapshot ? `${ageLabel(runtime.lastSnapshot.updatedAt)} ago` : "none"}`, `Complete snap   ${runtime.lastCompleteSnapshot ? `${ageLabel(runtime.lastCompleteSnapshot.updatedAt)} ago` : "none"}`, "", "Statusline renders and key presses never issue HTTP; only startup, the 90s timer, and /quota refresh do.", "", "Press Enter or Esc to close"];
+  return ["Codex Pool diagnostics", "", `Version         ${PLUGIN_VERSION}`, `Endpoint        ${runtime.endpoint || "unresolved"}`, `Credential      ${runtime.credentialSource}`, `Refresh cycles  ${runtime.refreshCycles}`, `HTTP requests   ${runtime.httpRequests}`, `Status renders  ${runtime.renderRequests}`, `Input requests  ${runtime.inputRequests}`, `Last error      ${runtime.lastErrorCategory ?? "none"}`, `Snapshot        ${runtime.lastSnapshot ? `${ageLabel(runtime.lastSnapshot.updatedAt)} ago` : "none"}`, `Complete snap   ${runtime.lastCompleteSnapshot ? `${ageLabel(runtime.lastCompleteSnapshot.updatedAt)} ago` : "none"}`, "", "Statusline renders and key presses never issue HTTP; refreshes occur on session start and /quota when stale or forced.", "", "Press Enter or Esc to close."];
 }
 async function showPanel(ctx: CommandContext, lines: string[]): Promise<void> {
   const text = lines.join("\n");
@@ -157,7 +157,6 @@ async function showPanel(ctx: CommandContext, lines: string[]): Promise<void> {
 export default function (pi: ExtensionApi): void {
   let activeContext: CommandContext | null = null;
   const publish = () => activeContext?.ui.setStatus("cpa-pool", statusText(displaySnapshot()) || undefined);
-  subscribers.add(publish);
   pi.registerCommand("quota", {
     description: "Show Codex account-pool quota (/quota refresh, /quota debug)",
     handler: async (args, ctx) => {
@@ -171,22 +170,14 @@ export default function (pi: ExtensionApi): void {
   pi.on("session_start", (_event, ctx) => {
     if (!ctx) return;
     activeContext = ctx;
-    if (!runtime.timerStarted) {
-      runtime.timerStarted = true;
-      void performRefresh(true).then(publish);
-      runtime.timer = ctx.setInterval(() => { void performRefresh(true).then(publish); }, REFRESH_MS);
-    } else publish();
+    subscribers.add(publish);
+    void performRefresh(true).then(publish);
   });
   pi.on("session_switch", (_event, ctx) => { if (!ctx) return; activeContext = ctx; publish(); });
   pi.on("session_shutdown", (_event, ctx) => {
     if (activeContext !== ctx) return;
     activeContext = null;
     subscribers.delete(publish);
-    if (runtime.timerStarted) {
-      if (runtime.timer !== null) ctx?.clearTimer(runtime.timer);
-      runtime.timer = null;
-      runtime.timerStarted = false;
-    }
   });
   pi.logger?.info("CPA Codex pool extension loaded; use /quota, /quota refresh, /quota debug");
 }

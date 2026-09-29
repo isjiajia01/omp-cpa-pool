@@ -13,8 +13,8 @@ omp plugin link ~/Developer/omp-cpa-pool
 
 Set `CPA_POOL_URL` to your endpoint and `CPA_POOL_READ_TOKEN` to its scoped read token. Alternatively, on macOS store the token in Keychain as service `cpa_pool_read_token`. Do not commit it to this repository. The source defaults to the author's endpoint; it is not a public quota service. The endpoint must return the schema parsed by `parseSnapshot()` in `index.ts`.
 
-The initial published version refreshes on session start, every 90 seconds, and when `/quota` needs newer data. `/quota refresh` forces one request. Statusline rendering and key presses do not issue requests.
+The client refreshes on session start. `/quota` refreshes if its cached snapshot is older than 90 seconds; `/quota refresh` forces one request. There is no background client timer. Statusline rendering and key presses do not issue requests.
 
 ## Source and license
 
-The published `index.ts` is a snapshot of the locally used version before removal of its 90-second client refresh. MIT licensed; see [LICENSE](LICENSE).
+The first public commit preserves the previously used 90-second background timer for reference. This revision removes that timer while retaining startup and on-demand refresh. MIT licensed; see [LICENSE](LICENSE).
